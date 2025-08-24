@@ -1,0 +1,6 @@
+# s6: Tunnel egress - decapsulamento e forwarding verso h2
+# Porta 0: verso s4
+# Porta 1: verso h2
+
+# Decapsula tunnel PoT e inoltra verso host finale
+table_add MyIngress.ipv4_lpm decap_tunnel 10.0.2.2/32 => 00:00:00:00:06:12 1

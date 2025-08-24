@@ -1,0 +1,12 @@
+# s2 (tunnel domain): forwarding dei pacchetti incapsulati (PoT update in P4)
+# Porta 0: verso s1
+# Porta 1: verso s3
+# Porta 2: verso s5
+
+# Forward tunnel per traffico verso h2
+# Da s1 (tunnel ingress) via s2 -> s3
+# Supponiamo cammino principale via s3
+
+table_add MyIngress.ipv4_lpm ipv4_forward 10.0.2.2/32 => 00:00:00:00:02:11 1
+# EVENTUALI alternate path (failover via s5):
+# table_add MyIngress.ipv4_lpm ipv4_forward 10.0.2.2/32 => 00:00:00:00:02:12 2
