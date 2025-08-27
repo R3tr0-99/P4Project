@@ -1,0 +1,386 @@
+
+/* Tunnel + Proof of Transit (v1model / BMv2)
+ * Compatibile con p4c 1.2.x (P4_16).
+ * Tabelle/azioni allineate con i tuoi commands.txt:
+ *   - ingress_classify / set_tunnel(tid, ingress_hop)
+ *   - tunnel_fwd / set_port(port)
+ *   - tunnel_transit / push_and_fwd(port, hop)
+ *   - egress_policy / egress_check(threshold, out_port, smac, dmac)
+ *   - (opzionale) ipv4_lpm / set_nhop(nhop_ip, port)
+ */
+
+#include <core.p4>
+#include <v1model.p4>
+
+const bit<16> ETYPE_IPV4   = 0x0800;
+const bit<16> ETYPE_TUNNEL = 0x1212;  // EtherType dedicato ai pacchetti tunnelizzati
+
+const bit<8>  MAX_STACK = 8;          // N massimo di hop nella validation stack
+
+/* =========================
+   Headers
+   ========================= */
+
+header ethernet_t {
+    bit<48> dstAddr;
+    bit<48> srcAddr;
+    bit<16> etherType;
+}
+
+header ipv4_t {
+    bit<4>    version;
+    bit<4>    ihl;
+    bit<8>    diffserv;    // DSCP/ECN
+    bit<16>   totalLen;
+    bit<16>   identification;
+    bit<3>    flags;
+    bit<13>   fragOffset;
+    bit<8>    ttl;
+    bit<8>    protocol;
+    bit<16>   hdrChecksum;
+    bit<32>   srcAddr;
+    bit<32>   dstAddr;
+}
+
+header tunnel_h {
+    bit<16> tunnel_id;
+    bit<8>  count;     // numero di validation_h al seguito
+    bit<8>  rsvd;
+}
+
+header validation_h {
+    bit<8> hop_value;
+    bit<8> rsvd;
+    bit<16> rsvd2;
+}
+
+/* Stack di validation headers */
+header_stack<validation_h, MAX_STACK> validation_stack_t;
+
+/* =========================
+   All headers / metadata
+   ========================= */
+
+struct headers_t {
+    ethernet_t        ethernet;
+    tunnel_h          tunnel;
+    validation_stack_t validation_stack;
+    ipv4_t            ipv4;
+}
+
+struct metadata_t {
+    bit<1> tunnel_chosen;
+    bit<1> egress_chosen;
+    bit<16> sum;
+}
+
+/* =========================
+   Parser
+   ========================= */
+
+parser MyParser(packet_in packet,
+                out headers_t hdr,
+                inout metadata_t meta,
+                inout standard_metadata_t standard_metadata)
+{
+    state start {
+        transition parse_ethernet;
+    }
+
+    state parse_ethernet {
+        packet.extract(hdr.ethernet);
+        transition select(hdr.ethernet.etherType) {
+            ETYPE_IPV4   : parse_ipv4;
+            ETYPE_TUNNEL : parse_tunnel;
+            default      : accept;
+        }
+    }
+
+    state parse_tunnel {
+        packet.extract(hdr.tunnel);
+        transition parse_stack;
+    }
+
+    state parse_stack {
+        transition select(hdr.tunnel.count) {
+            0: parse_ipv4;
+            default: parse_stack_one;
+        }
+    }
+
+    state parse_stack_one {
+        packet.extract(hdr.validation_stack.next);
+        hdr.tunnel.count = hdr.tunnel.count - 1;
+        transition parse_stack;
+    }
+
+    state parse_ipv4 {
+        packet.extract(hdr.ipv4);
+        transition accept;
+    }
+}
+
+/* =========================
+   Checksum
+   ========================= */
+
+control MyVerifyChecksum(inout headers_t hdr, inout metadata_t meta) {
+    apply { }
+}
+
+control MyComputeChecksum(inout headers_t hdr, inout metadata_t meta) {
+    apply {
+        if (hdr.ipv4.isValid()) {
+            update_checksum(
+                hdr.ipv4.isValid(),
+                { hdr.ipv4.version, hdr.ipv4.ihl, hdr.ipv4.diffserv, hdr.ipv4.totalLen,
+                  hdr.ipv4.identification, hdr.ipv4.flags, hdr.ipv4.fragOffset,
+                  hdr.ipv4.ttl, hdr.ipv4.protocol, hdr.ipv4.srcAddr, hdr.ipv4.dstAddr },
+                hdr.ipv4.hdrChecksum,
+                HashAlgorithm.csum16
+            );
+        }
+    }
+}
+
+/* =========================
+   Ingress
+   ========================= */
+
+control MyIngress(inout headers_t hdr,
+                  inout metadata_t meta,
+                  inout standard_metadata_t standard_metadata)
+{
+    action drop() {
+        mark_to_drop(standard_metadata);
+    }
+
+    /* ---- Actions ---- */
+
+    action set_tunnel(bit<16> tid, bit<8> ingress_hop) {
+        meta.tunnel_chosen = 1;
+        hdr.tunnel.setValid();
+        hdr.tunnel.tunnel_id = tid;
+        hdr.tunnel.count = 0;
+
+        if (ingress_hop != 0) {
+            if (!hdr.validation_stack[0].isValid()) {
+                hdr.validation_stack.push_front(1);
+            }
+            hdr.validation_stack[0].hop_value = ingress_hop;
+            hdr.tunnel.count = hdr.tunnel.count + 1;
+        }
+        // EtherType sarà impostato nel deparser se tunnel è valido
+    }
+
+    action set_port(bit<9> port) {
+        standard_metadata.egress_spec = port;
+    }
+
+    action push_and_fwd(bit<9> port, bit<8> hop_value) {
+        /* Append validazione */
+        if (!hdr.validation_stack[0].isValid()) {
+            hdr.validation_stack.push_front(1);
+        } else if (!hdr.validation_stack[1].isValid()) {
+            hdr.validation_stack.push_front(1);
+        } else if (!hdr.validation_stack[2].isValid()) {
+            hdr.validation_stack.push_front(1);
+        } else if (!hdr.validation_stack[3].isValid()) {
+            hdr.validation_stack.push_front(1);
+        } else if (!hdr.validation_stack[4].isValid()) {
+            hdr.validation_stack.push_front(1);
+        } else if (!hdr.validation_stack[5].isValid()) {
+            hdr.validation_stack.push_front(1);
+        } else if (!hdr.validation_stack[6].isValid()) {
+            hdr.validation_stack.push_front(1);
+        } else if (!hdr.validation_stack[7].isValid()) {
+            hdr.validation_stack.push_front(1);
+        }
+        /* Scrivi hop_value nel primo elemento (quello appena pushato) */
+        hdr.validation_stack[0].hop_value = hop_value;
+
+        /* Aggiorna il contatore nel tunnel per la parsificazione futura */
+        hdr.tunnel.count = hdr.tunnel.count + 1;
+
+        /* Porta di uscita */
+        standard_metadata.egress_spec = port;
+    }
+
+    action egress_check(bit<16> threshold, bit<9> out_port,
+                        bit<48> smac, bit<48> dmac)
+    {
+        meta.sum = 0;
+        /* Unroll fino a MAX_STACK */
+        if (hdr.validation_stack[0].isValid()) { meta.sum = meta.sum + hdr.validation_stack[0].hop_value; }
+        if (hdr.validation_stack[1].isValid()) { meta.sum = meta.sum + hdr.validation_stack[1].hop_value; }
+        if (hdr.validation_stack[2].isValid()) { meta.sum = meta.sum + hdr.validation_stack[2].hop_value; }
+        if (hdr.validation_stack[3].isValid()) { meta.sum = meta.sum + hdr.validation_stack[3].hop_value; }
+        if (hdr.validation_stack[4].isValid()) { meta.sum = meta.sum + hdr.validation_stack[4].hop_value; }
+        if (hdr.validation_stack[5].isValid()) { meta.sum = meta.sum + hdr.validation_stack[5].hop_value; }
+        if (hdr.validation_stack[6].isValid()) { meta.sum = meta.sum + hdr.validation_stack[6].hop_value; }
+        if (hdr.validation_stack[7].isValid()) { meta.sum = meta.sum + hdr.validation_stack[7].hop_value; }
+
+        if (meta.sum >= threshold) {
+            /* Decapsulazione: invalida tunnel e stack */
+            hdr.tunnel.setInvalid();
+            hdr.validation_stack[0].setInvalid();
+            hdr.validation_stack[1].setInvalid();
+            hdr.validation_stack[2].setInvalid();
+            hdr.validation_stack[3].setInvalid();
+            hdr.validation_stack[4].setInvalid();
+            hdr.validation_stack[5].setInvalid();
+            hdr.validation_stack[6].setInvalid();
+            hdr.validation_stack[7].setInvalid();
+
+            /* Riscrivi MAC e imposta la porta */
+            hdr.ethernet.srcAddr = smac;
+            hdr.ethernet.dstAddr = dmac;
+            standard_metadata.egress_spec = out_port;
+            meta.egress_chosen = 1;
+        } else {
+            mark_to_drop(standard_metadata);
+            meta.egress_chosen = 1; // per saltare eventuale transit
+        }
+    }
+
+    action set_nhop(bit<32> nhop, bit<9> port) {
+        // opzionale: forwarding IPv4 classico (se vuoi fuori dal tunnel)
+        standard_metadata.egress_spec = port;
+    }
+
+    /* ---- Tables ---- */
+
+    table ingress_classify {
+        key = {
+            hdr.ipv4.srcAddr : exact;
+            hdr.ipv4.dstAddr : exact;
+            hdr.ipv4.diffserv : ternary;
+        }
+        actions = {
+            set_tunnel;
+            @defaultonly drop;
+            NoAction;
+        }
+        size = 1024;
+        default_action = NoAction();
+    }
+
+    table tunnel_fwd {
+        key = {
+            hdr.tunnel.tunnel_id : exact;
+        }
+        actions = { set_port; NoAction; }
+        size = 1024;
+        default_action = NoAction();
+    }
+
+    table tunnel_transit {
+        key = {
+            hdr.tunnel.tunnel_id : exact;
+        }
+        actions = { push_and_fwd; NoAction; }
+        size = 2048;
+        default_action = NoAction();
+    }
+
+    table egress_policy {
+        key = {
+            hdr.tunnel.tunnel_id : exact;
+        }
+        actions = { egress_check; NoAction; }
+        size = 1024;
+        default_action = NoAction();
+    }
+
+    table ipv4_lpm {
+        key = {
+            hdr.ipv4.dstAddr : lpm;
+        }
+        actions = { set_nhop; drop; NoAction; }
+        size = 1024;
+        default_action = NoAction();
+    }
+
+    /* ---- Apply logic ---- */
+
+    apply {
+        meta.tunnel_chosen = 0;
+        meta.egress_chosen = 0;
+        meta.sum = 0;
+
+        if (hdr.tunnel.isValid()) {
+            /* Siamo dentro il tunnel domain */
+            /* Se questo nodo è egress per il tunnel_id corrente, applica la policy */
+            egress_policy.apply();
+            if (meta.egress_chosen == 0) {
+                /* Non egress: transito */
+                tunnel_transit.apply();
+            }
+        } else if (hdr.ipv4.isValid()) {
+            /* Nodo di ingresso (o traffico fuori tunnel) */
+            ingress_classify.apply();
+            if (meta.tunnel_chosen == 1) {
+                /* abbiamo creato il tunnel: decidi la porta in base al tunnel_id */
+                tunnel_fwd.apply();
+            } else {
+                /* fallback: IPv4 classico (opzionale) */
+                ipv4_lpm.apply();
+            }
+        } else {
+            /* Non IPv4: droppa */
+            drop();
+        }
+    }
+}
+
+/* =========================
+   Egress (no-op)
+   ========================= */
+
+control MyEgress(inout headers_t hdr,
+                 inout metadata_t meta,
+                 inout standard_metadata_t standard_metadata)
+{ apply { } }
+
+/* =========================
+   Deparser
+   ========================= */
+
+control MyDeparser(packet_out packet,
+                   in headers_t hdr)
+{
+    apply {
+        /* EtherType coerente con la presenza del tunnel */
+        if (hdr.tunnel.isValid()) {
+            packet.emit(hdr.ethernet);
+            packet.emit(hdr.tunnel);
+            /* emetti gli header di validazione presenti in ordine di stack */
+            if (hdr.validation_stack[0].isValid()) { packet.emit(hdr.validation_stack[0]); }
+            if (hdr.validation_stack[1].isValid()) { packet.emit(hdr.validation_stack[1]); }
+            if (hdr.validation_stack[2].isValid()) { packet.emit(hdr.validation_stack[2]); }
+            if (hdr.validation_stack[3].isValid()) { packet.emit(hdr.validation_stack[3]); }
+            if (hdr.validation_stack[4].isValid()) { packet.emit(hdr.validation_stack[4]); }
+            if (hdr.validation_stack[5].isValid()) { packet.emit(hdr.validation_stack[5]); }
+            if (hdr.validation_stack[6].isValid()) { packet.emit(hdr.validation_stack[6]); }
+            if (hdr.validation_stack[7].isValid()) { packet.emit(hdr.validation_stack[7]); }
+            packet.emit(hdr.ipv4);
+        } else {
+            packet.emit(hdr.ethernet);
+            if (hdr.ipv4.isValid()) {
+                hdr.ethernet.etherType = ETYPE_IPV4;
+                packet.emit(hdr.ipv4);
+            }
+        }
+    }
+}
+
+/* =========================
+   Switch main
+   ========================= */
+
+V1Switch(MyParser(),
+         MyVerifyChecksum(),
+         MyIngress(),
+         MyEgress(),
+         MyComputeChecksum(),
+         MyDeparser()) main;

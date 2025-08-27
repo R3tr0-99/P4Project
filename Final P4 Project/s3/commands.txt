@@ -1,4 +1,2 @@
-# forward: s3 -> s4 (port 2), hop=4
 table_add tunnel_transit push_and_fwd 10 => 2 4
-# reverse: s3 -> s2 (port 1), hop=4
 table_add tunnel_transit push_and_fwd 20 => 1 4
