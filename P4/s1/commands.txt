@@ -1,9 +1,0 @@
-# s1 (ingress): incapsula in tunnel per h2, forward normale per altre reti
-# Porta 0: h1
-# Porta 1: s2
-
-# Encapsulamento di pacchetti destinati a h2 (10.0.2.2)
-table_add MyIngress.ipv4_lpm encap_tunnel 10.0.2.2/32 => 0x66 0x01 00:00:00:00:01:12 1
-# Forwarding (eventuale) per traffico locale/extra
-# Esempio: instradamento da h1 a s2
-# table_add MyIngress.ipv4_lpm ipv4_forward ...

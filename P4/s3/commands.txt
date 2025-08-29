@@ -1,6 +1,0 @@
-# s3 (tunnel domain): forwarding tunnel PoT
-# Porta 0: verso s2
-# Porta 1: verso s4
-
-# Forward tunnellizzato verso h2 (passa a s4)
-table_add MyIngress.ipv4_lpm ipv4_forward 10.0.2.2/32 => 00:00:00:00:03:11 1
