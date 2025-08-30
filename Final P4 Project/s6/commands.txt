@@ -1,3 +1,0 @@
-table_add ingress_classify set_tunnel 10.0.2.2 10.0.1.1 0&&&0 => 20 0
-table_add tunnel_fwd set_port 20 => 1
-table_add egress_policy egress_check 10 => 12 2 00:00:00:00:02:02 00:00:00:00:06:06
