@@ -7,7 +7,7 @@ const bit<16> TYPE_TUNNEL = 0x1212;  //EtherType of our tunnel
 const bit<16> TYPE_IPV4 = 0x800;
 
 //Max number of validation_h in the stack
-const bit<8> MAX_STACK = 10;
+const bit<16> MAX_STACK = 5;
 
 /*************************************************************************
 *********************** H E A D E R S  ***********************************
@@ -27,7 +27,7 @@ header ethernet_t {
 header tunnel_h_t {
     bit<16> tunnel_id;
     bit<16> stack_len;
-    bit<8> rsvd;
+    bit<32> rsvd;
 }
 
 //Header validation for the proof of transit
@@ -52,7 +52,7 @@ header ipv4_t {
 }
 
 struct parser_md_t {
-    bit<8> remaining; //Number of validation_h to extract
+    bit<16> remaining; //Number of validation_h to extract
 }
 
 struct ingress_md_t {} //Space for future extension
@@ -77,7 +77,6 @@ struct headers {
 }
 
 error { //List of possible errors
-    NoError,
     StackOverflow,
     IPv4HeaderTooShort
 }
@@ -173,7 +172,7 @@ control MyIngress(inout headers hdr,
             NoAction;
         }
         size = 2048;
-        default_action = drop();
+        default_action = NoAction();
     }
 
     
@@ -184,7 +183,7 @@ control MyIngress(inout headers hdr,
         hdr.tunnel_h.stack_len = 1;
         hdr.ethernet.etherType = TYPE_TUNNEL;
 
-        hdr.vstack.push_front(1);
+        hdr.vstack[0].setValid();
         hdr.vstack[0].hop_value = initial_hop;
 
         standard_metadata.egress_spec = port;
@@ -195,7 +194,6 @@ control MyIngress(inout headers hdr,
     //Matching policy on IPv4 src, dst and DSCP for starting the tunnel
     table ipv4_classify {
         key = {
-            hdr.ipv4.srcAddr: exact;
             hdr.ipv4.dstAddr: lpm;
             hdr.ipv4.diffserv[7:2]: exact;  //For the DSCP we need the 6 highest bit
         }
@@ -210,9 +208,9 @@ control MyIngress(inout headers hdr,
 
     //Append of validation_h and forward on port
     action append_and_fwd(egressSpec_t port, bit<16> hop_value) {
-        verify(hdr.tunnel_h.stack_len < MAX_STACK, error.StackOverflow);
-        hdr.vstack.push_front(1);
-        hdr.vstack[0].hop_value = hop_value;
+    
+        hdr.vstack[hdr.tunnel_h.stack_len].setValid();
+        hdr.vstack[hdr.tunnel_h.stack_len].hop_value = hop_value;
         hdr.tunnel_h.stack_len = hdr.tunnel_h.stack_len + 1;
         standard_metadata.egress_spec = port;
     }
@@ -229,12 +227,13 @@ control MyIngress(inout headers hdr,
             NoAction;
         }
         size = 1024;
-        default_action = drop();
+        default_action = NoAction();
     }
     // TODO: also remember to add table entries!
 
 
     apply {
+        log_msg("INGRESS - Input port: {}", {standard_metadata.ingress_port});
         // TODO: Update control flow
         if (hdr.ipv4.isValid() && !hdr.tunnel_h.isValid()) {
             if(!ipv4_classify.apply().hit) {
@@ -243,7 +242,13 @@ control MyIngress(inout headers hdr,
         }
 
         if (hdr.tunnel_h.isValid()){
-            tunnel_fwd.apply();
+            if(hdr.tunnel_h.stack_len < MAX_STACK) {
+                log_msg({"Forwarding tunnel ID: {}", hdr.tunnel_h.tunnel_id});
+                tunnel_fwd.apply();
+            }
+            else {
+                drop();
+            }
         }
     }
 }
@@ -255,7 +260,7 @@ control MyIngress(inout headers hdr,
 control MyEgress(inout headers hdr,
                  inout metadata meta,
                  inout standard_metadata_t standard_metadata) {
-    action set_threshold(bit<16> t) {
+    action set_threshold(bit<32> t) {
         meta.eg.thresh = t;
     }
 
@@ -276,6 +281,10 @@ control MyEgress(inout headers hdr,
 
     action set_egress(bit<9> port) {
         standard_metadata.egress_spec = port;
+    }
+    
+    action drop() {
+        mark_to_drop(standard_metadata);
     }
 
 
@@ -299,29 +308,19 @@ control MyEgress(inout headers hdr,
 
         //Sum of the stack
         meta.eg.sum = 0;
-        if(hdr.vstack[0].isValid()){ meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[0].hop_value;}
-        if(hdr.vstack[1].isValid()){ meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[1].hop_value;}
-        if(hdr.vstack[2].isValid()){ meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[2].hop_value;}
-        if(hdr.vstack[3].isValid()){ meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[3].hop_value;}
-        if(hdr.vstack[4].isValid()){ meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[4].hop_value;}
-        if(hdr.vstack[5].isValid()){ meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[5].hop_value;}
-        if(hdr.vstack[6].isValid()){ meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[6].hop_value;}
-        if(hdr.vstack[7].isValid()){ meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[7].hop_value;}
-        if(hdr.vstack[8].isValid()){ meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[8].hop_value;}
-        if(hdr.vstack[9].isValid()){ meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[9].hop_value;}
+        if(hdr.vstack[0].isValid()) { meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[0].hop_value; }
+        if(hdr.vstack[1].isValid()) { meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[1].hop_value; } 
+        if(hdr.vstack[2].isValid()) { meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[2].hop_value; }
+        if(hdr.vstack[3].isValid()) { meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[3].hop_value; }
+        if(hdr.vstack[4].isValid()) { meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[4].hop_value; }
 
         //Pop and IPv4 forward or DROP
         if(meta.eg.sum >= (bit<32>) meta.eg.thresh) {
-            if (hdr.vstack[0].isValid()){ hdr.vstack[0].setInvalid();} 
-            if (hdr.vstack[1].isValid()){ hdr.vstack[1].setInvalid();} 
-            if (hdr.vstack[2].isValid()){ hdr.vstack[2].setInvalid();} 
-            if (hdr.vstack[3].isValid()){ hdr.vstack[3].setInvalid();} 
-            if (hdr.vstack[4].isValid()){ hdr.vstack[4].setInvalid();} 
-            if (hdr.vstack[5].isValid()){ hdr.vstack[5].setInvalid();} 
-            if (hdr.vstack[6].isValid()){ hdr.vstack[6].setInvalid();} 
-            if (hdr.vstack[7].isValid()){ hdr.vstack[7].setInvalid();} 
-            if (hdr.vstack[8].isValid()){ hdr.vstack[8].setInvalid();} 
-            if (hdr.vstack[9].isValid()){ hdr.vstack[9].setInvalid();} 
+            if (hdr.vstack[0].isValid()) { hdr.vstack[0].setInvalid(); } 
+            if (hdr.vstack[1].isValid()) { hdr.vstack[1].setInvalid(); } 
+            if (hdr.vstack[2].isValid()) { hdr.vstack[2].setInvalid(); } 
+            if (hdr.vstack[3].isValid()) { hdr.vstack[3].setInvalid(); } 
+            if (hdr.vstack[4].isValid()) { hdr.vstack[4].setInvalid(); } 
             hdr.tunnel_h.setInvalid();
             hdr.ethernet.etherType = TYPE_IPV4;
             ipv4_lpm_egress.apply();
@@ -363,22 +362,14 @@ control MyComputeChecksum(inout headers  hdr, inout metadata meta) {
 control MyDeparser(packet_out packet, in headers hdr) {
     apply {
         packet.emit(hdr.ethernet);
-        if (hdr.tunnel_h.isValid()) {
-            packet.emit(hdr.tunnel_h);
-            if (hdr.vstack[0].isValid()) { packet.emit(hdr.vstack[0]);}
-            if (hdr.vstack[1].isValid()) { packet.emit(hdr.vstack[1]);}
-            if (hdr.vstack[2].isValid()) { packet.emit(hdr.vstack[2]);}
-            if (hdr.vstack[3].isValid()) { packet.emit(hdr.vstack[3]);}
-            if (hdr.vstack[4].isValid()) { packet.emit(hdr.vstack[4]);}
-            if (hdr.vstack[5].isValid()) { packet.emit(hdr.vstack[5]);}
-            if (hdr.vstack[6].isValid()) { packet.emit(hdr.vstack[6]);}
-            if (hdr.vstack[7].isValid()) { packet.emit(hdr.vstack[7]);}
-            if (hdr.vstack[8].isValid()) { packet.emit(hdr.vstack[8]);}
-            if (hdr.vstack[9].isValid()) { packet.emit(hdr.vstack[9]);}
-        }
-        if (hdr.ipv4.isValid()) {
-            packet.emit(hdr.ipv4);
-        }
+        packet.emit(hdr.tunnel_h);
+        packet.emit(hdr.vstack[0]);
+        packet.emit(hdr.vstack[1]);
+        packet.emit(hdr.vstack[2]);
+        packet.emit(hdr.vstack[3]);
+        packet.emit(hdr.vstack[4]);
+        packet.emit(hdr.ipv4);
+       
     }
 }
 

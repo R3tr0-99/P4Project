@@ -1,51 +1,63 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 # Reason-GPL: import-scapy
-import argparse
-import random
-import socket
-
-from myTunnel_header import MyTunnel
-from scapy.all import IP, TCP, Ether, get_if_hwaddr, get_if_list, sendp
-
+import argparse, random, socket
+from scapy.all import Ether, IP, TCP, Raw, get_if_hwaddr, get_if_list, sendp
+from myTunnel_header import TYPE_TUNNEL, TunnelH, ValidationH
 
 def get_if():
-    ifs=get_if_list()
-    iface=None # "h1-eth0"
     for i in get_if_list():
         if "eth0" in i:
-            iface=i
-            break;
-    if not iface:
-        print("Cannot find eth0 interface")
-        exit(1)
-    return iface
+            return i
+    raise RuntimeError("Cannot find eth0 interface")
+
+def build_plain_ipv4(dst_ip, dscp, msg, iface):
+    tos = (dscp & 0x3F) << 2   # DSCP sui 6 bit alti di diffserv; ECN=0
+    pkt = (
+        Ether(src=get_if_hwaddr(iface), dst="ff:ff:ff:ff:ff:ff") /
+        IP(dst=dst_ip, tos=tos) /
+        TCP(dport=1234, sport=random.randint(49152,65535)) /
+        Raw(load=msg.encode())
+    )
+    return pkt
+
+def build_manual_tunnel(dst_ip, tid, validations, msg, iface):
+    # ✅ MAC destinazione fisso (esempio) o meglio: risolvi ARP
+    pkt = (
+        Ether(src=get_if_hwaddr(iface), dst="00:00:00:00:00:02", type=TYPE_TUNNEL) /
+        TunnelH(tunnel_id=int(tid), stack_len=len(validations), rsvd=0)
+    )
+    
+    for v in validations:
+        pkt = pkt / ValidationH(hop_value=int(v), rsvd=0)
+    
+    pkt = pkt / IP(dst=dst_ip) / TCP(dport=1234, sport=random.randint(49152,65535)) / Raw(load=msg.encode())
+    return pkt
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('ip_addr', type=str, help="The destination IP address to use")
-    parser.add_argument('message', type=str, help="The message to include in packet")
-    parser.add_argument('--t_id', type=int, default=None, help='The myTunnel t_id to use, if unspecified then myTunnel header will not be included in packet')
-    args = parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("ip_addr", type=str, help="Destination IP (e.g., 10.0.0.2)")
+    p.add_argument("message", type=str, help="Payload message")
+    p.add_argument("--dscp", type=int, default=0, help="DSCP 0..63 (usato dal P4 in ingress)")
+    # Debug: costruzione manuale del tunnel (sconsigliata per i test finali)
+    p.add_argument("--tid", type=int, default=None, help="Forza invio con TunnelH tunnel_id")
+    p.add_argument("--validation", type=str, default="", help="Lista valori hop separati da virgola, es: '5,7'")
+    args = p.parse_args()
 
-    addr = socket.gethostbyname(args.ip_addr)
-    t_id = args.t_id
     iface = get_if()
+    dst_ip = socket.gethostbyname(args.ip_addr)
 
-    if (t_id is not None):
-        print("sending on interface {} to t_id {}".format(iface, str(t_id)))
-        pkt =  Ether(src=get_if_hwaddr(iface), dst='ff:ff:ff:ff:ff:ff')
-        pkt = pkt / MyTunnel(t_id=t_id) / IP(dst=addr) / TCP(dport=1234, sport=random.randint(49152,65535)) / args.message
+    if args.tid is None:
+        print(f"[plain] iface={iface} dst={dst_ip} dscp={args.dscp}")
+        pkt = build_plain_ipv4(dst_ip, args.dscp, args.message, iface)
     else:
-        print("sending on interface {} to IP addr {}".format(iface, str(addr)))
-        pkt =  Ether(src=get_if_hwaddr(iface), dst='ff:ff:ff:ff:ff:ff')
-        pkt = pkt / IP(dst=addr) / TCP(dport=1234, sport=random.randint(49152,65535)) / args.message
+        vals = [v for v in args.validation.split(",") if v != ""]
+        print(f"[manual-tunnel] iface={iface} dst={dst_ip} tid={args.tid} stack_len={len(vals)}")
+        pkt = build_manual_tunnel(dst_ip, args.tid, vals, args.message, iface)
 
     pkt.show2()
-#    hexdump(pkt)
-#    print "len(pkt) = ", len(pkt)
     sendp(pkt, iface=iface, verbose=False)
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
+

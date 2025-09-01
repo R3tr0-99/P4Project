@@ -1,8 +1,2 @@
-table_add MyIngress.ipv4_lpm ipv4_forward 10.0.0.2/32 => 00:01:02:03:04:22 2
-
-
-table_add MyIngress.ipv4_lpm myTunnel_ingress 10.0.0.2/32 => 12 3
-table_add MyIngress.ipv4_lpm myTunnel_ingress 10.0.0.3/32 => 13 2
-
-table_add MyIngress.myTunnel_exact myTunnel_forward 12 => 3
-table_add MyIngress.myTunnel_exact myTunnel_forward 13 => 2
+table_add MyIngress.ipv4_classify set_tunnel 10.0.0.2/32 0 => 12 2 5
+table_add MyIngress.ipv4_classify set_tunnel 10.0.0.2/32 46 => 13 2 5
