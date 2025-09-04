@@ -1,4 +1,4 @@
-table_add MyIngress.tunnel_fwd append_and_fwd 12 => 2 2
-table_add MyIngress.tunnel_fwd append_and_fwd 13 => 2 2
+table_add MyIngress.tunnel_fwd append_and_fwd 12 => 2 5
+table_add MyIngress.tunnel_fwd append_and_fwd 13 => 2 10
 
 

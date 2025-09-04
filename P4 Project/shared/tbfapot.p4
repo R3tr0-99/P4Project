@@ -96,7 +96,9 @@ parser MyParser(packet_in packet,
     }
 
     state parse_ethernet {
+        log_msg("Ricevuto pacchetto da parsare");
         packet.extract(hdr.ethernet);
+        log_msg("PARSER: Ethernet - Type: {}", {hdr.ethernet.etherType});
         transition select(hdr.ethernet.etherType) {
             TYPE_TUNNEL : parse_tunnel_h;
             TYPE_IPV4 : parse_ipv4;
@@ -106,6 +108,7 @@ parser MyParser(packet_in packet,
 
     state parse_tunnel_h {
         packet.extract(hdr.tunnel_h);
+        log_msg("PARSER: Tunnel Header - ID: {}, Stack: {}", {hdr.tunnel_h.tunnel_id, hdr.tunnel_h.stack_len});
         verify(hdr.tunnel_h.stack_len <= MAX_STACK, error.StackOverflow);
         meta.p.remaining = hdr.tunnel_h.stack_len;
         transition select(meta.p.remaining) {
@@ -116,6 +119,7 @@ parser MyParser(packet_in packet,
 
     state parse_validation_loop {
         packet.extract(hdr.vstack.next);
+        log_msg("PARSER: Validation Header {} - Remaining: {}", {MAX_STACK, meta.p.remaining});
         meta.p.remaining = meta.p.remaining - 1;
         transition select(meta.p.remaining) {
             0 : parse_ipv4;
@@ -125,6 +129,7 @@ parser MyParser(packet_in packet,
 
     state parse_ipv4 {
         packet.extract(hdr.ipv4);
+        log_msg("PARSER: IPv4 - Src: {}, Dst: {}", {hdr.ipv4.srcAddr, hdr.ipv4.dstAddr});
         verify(hdr.ipv4.ihl >= 5, error.IPv4HeaderTooShort);
         transition accept;
     }
@@ -148,6 +153,7 @@ control MyVerifyChecksum(inout headers hdr, inout metadata meta) {
 control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
+    
     action drop() {
         mark_to_drop(standard_metadata);
     }
@@ -159,32 +165,15 @@ control MyIngress(inout headers hdr,
         hdr.ethernet.dstAddr = dstAddr;
         hdr.ipv4.ttl = hdr.ipv4.ttl - 1;
     }
-
-    
-    //Table without tunneling
-    table ipv4_lpm {
-        key = {
-            hdr.ipv4.dstAddr: lpm;
-        }
-        actions = {
-            ipv4_forward;
-            drop;
-            NoAction;
-        }
-        size = 2048;
-        default_action = NoAction();
-    }
-
-    
+ 
     //Creation of tunnel_h + initialization of the stack with 1 validation_h
-    action set_tunnel(bit<16> tid, bit<9> port, bit<16> initial_hop) {
+    action set_tunnel(bit<16> tid, egressSpec_t port) {
         hdr.tunnel_h.setValid();
         hdr.tunnel_h.tunnel_id = tid;
         hdr.tunnel_h.stack_len = 1;
         hdr.ethernet.etherType = TYPE_TUNNEL;
 
         hdr.vstack[0].setValid();
-        hdr.vstack[0].hop_value = initial_hop;
 
         standard_metadata.egress_spec = port;
         hdr.ipv4.ttl = hdr.ipv4.ttl -1;
@@ -194,10 +183,12 @@ control MyIngress(inout headers hdr,
     //Matching policy on IPv4 src, dst and DSCP for starting the tunnel
     table ipv4_classify {
         key = {
+            hdr.ipv4.srcAddr: exact;
             hdr.ipv4.dstAddr: lpm;
             hdr.ipv4.diffserv[7:2]: exact;  //For the DSCP we need the 6 highest bit
         }
         actions = {
+            ipv4_forward;
             set_tunnel;
             NoAction;
         }
@@ -214,8 +205,8 @@ control MyIngress(inout headers hdr,
         hdr.tunnel_h.stack_len = hdr.tunnel_h.stack_len + 1;
         standard_metadata.egress_spec = port;
     }
-
-
+    
+  
     //Forwarding on tunnel_id with append of the value
     table tunnel_fwd{
         key = {
@@ -227,39 +218,30 @@ control MyIngress(inout headers hdr,
             NoAction;
         }
         size = 1024;
+        default_action = drop();
+    }
+    
+    
+    action set_egress(bit<9> port) {
+        standard_metadata.egress_spec = port;
+    }
+    
+    
+    //After the pop of the header final IPv4 to the host port
+    table ipv4_egress {
+        key = {
+            hdr.ipv4.dstAddr: lpm;
+        }
+        actions = {
+            set_egress;
+            drop;
+            NoAction;
+        }
+        size = 2048;
         default_action = NoAction();
     }
-    // TODO: also remember to add table entries!
-
-
-    apply {
-        log_msg("INGRESS - Input port: {}", {standard_metadata.ingress_port});
-        // TODO: Update control flow
-        if (hdr.ipv4.isValid() && !hdr.tunnel_h.isValid()) {
-            if(!ipv4_classify.apply().hit) {
-                ipv4_lpm.apply();
-            }
-        }
-
-        if (hdr.tunnel_h.isValid()){
-            if(hdr.tunnel_h.stack_len < MAX_STACK) {
-                log_msg({"Forwarding tunnel ID: {}", hdr.tunnel_h.tunnel_id});
-                tunnel_fwd.apply();
-            }
-            else {
-                drop();
-            }
-        }
-    }
-}
-
-/*************************************************************************
-****************  E G R E S S   P R O C E S S I N G   *******************
-*************************************************************************/
-
-control MyEgress(inout headers hdr,
-                 inout metadata meta,
-                 inout standard_metadata_t standard_metadata) {
+    
+    
     action set_threshold(bit<32> t) {
         meta.eg.thresh = t;
     }
@@ -279,56 +261,62 @@ control MyEgress(inout headers hdr,
     }
 
 
-    action set_egress(bit<9> port) {
-        standard_metadata.egress_spec = port;
-    }
-    
-    action drop() {
-        mark_to_drop(standard_metadata);
-    }
 
-
-    //After the pop of the header final IPv4 to the host port
-    table ipv4_lpm_egress {
-        key = {
-            hdr.ipv4.dstAddr: lpm;
+    apply {
+        log_msg("INGRESS - Input port: {}", {standard_metadata.ingress_port});
+        
+        if (hdr.ipv4.isValid() && !hdr.tunnel_h.isValid()) {
+            ipv4_classify.apply();
+            log_msg("Pacchetto con IPv4 tunnelato e inviato su porta: {}", {standard_metadata.egress_port});
+            
         }
-        actions = {
-            set_egress;
-            drop;
-            NoAction;
+        
+        if(hdr.tunnel_h.isValid() && hdr.tunnel_h.stack_len == 4) {
+            ipv4_egress.apply();
+            tunnel_threshold.apply();
+                
+            //Sum of the stack
+            meta.eg.sum = 0;
+            meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[1].hop_value;  
+            meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[2].hop_value; 
+            meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[3].hop_value;
+            log_msg("La somma è: {}", {meta.eg.sum});
+            
+            //Pop and IPv4 forward or DROP
+            if(meta.eg.sum >= (bit<32>) meta.eg.thresh) {
+                hdr.tunnel_h.setInvalid();
+                hdr.vstack[0].setInvalid();
+                hdr.vstack[1].setInvalid();
+                hdr.vstack[2].setInvalid();
+                hdr.vstack[3].setInvalid();
+                hdr.ethernet.etherType = TYPE_IPV4;
+                log_msg("Pacchetto consegnato correttamente a destinazione sulla porta: {}", {standard_metadata.egress_spec});
+            }
+            
+            else{
+                log_msg("La somma è insufficiente, drop del pacchetto in corso");
+                drop();
+            }
         }
-        size = 2048;
-        default_action = NoAction();
-    }
-
-
-    apply{
-        tunnel_threshold.apply();
-
-        //Sum of the stack
-        meta.eg.sum = 0;
-        if(hdr.vstack[0].isValid()) { meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[0].hop_value; }
-        if(hdr.vstack[1].isValid()) { meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[1].hop_value; } 
-        if(hdr.vstack[2].isValid()) { meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[2].hop_value; }
-        if(hdr.vstack[3].isValid()) { meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[3].hop_value; }
-        if(hdr.vstack[4].isValid()) { meta.eg.sum = meta.eg.sum + (bit<32>) hdr.vstack[4].hop_value; }
-
-        //Pop and IPv4 forward or DROP
-        if(meta.eg.sum >= (bit<32>) meta.eg.thresh) {
-            if (hdr.vstack[0].isValid()) { hdr.vstack[0].setInvalid(); } 
-            if (hdr.vstack[1].isValid()) { hdr.vstack[1].setInvalid(); } 
-            if (hdr.vstack[2].isValid()) { hdr.vstack[2].setInvalid(); } 
-            if (hdr.vstack[3].isValid()) { hdr.vstack[3].setInvalid(); } 
-            if (hdr.vstack[4].isValid()) { hdr.vstack[4].setInvalid(); } 
-            hdr.tunnel_h.setInvalid();
-            hdr.ethernet.etherType = TYPE_IPV4;
-            ipv4_lpm_egress.apply();
-        }
+        
         else {
-            mark_to_drop(standard_metadata);
-        }
+            log_msg("Forwarding tunnel ID: {}", {hdr.tunnel_h.tunnel_id});
+            tunnel_fwd.apply();
+            log_msg("Pacchetto forwardato");
+        }    
+        
     }
+}
+
+/*************************************************************************
+****************  E G R E S S   P R O C E S S I N G   *******************
+*************************************************************************/
+
+control MyEgress(inout headers hdr,
+                 inout metadata meta,
+                 inout standard_metadata_t standard_metadata) {
+   
+    apply{}
 }
 
 /*************************************************************************
@@ -367,7 +355,6 @@ control MyDeparser(packet_out packet, in headers hdr) {
         packet.emit(hdr.vstack[1]);
         packet.emit(hdr.vstack[2]);
         packet.emit(hdr.vstack[3]);
-        packet.emit(hdr.vstack[4]);
         packet.emit(hdr.ipv4);
        
     }

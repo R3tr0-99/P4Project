@@ -1,4 +1,6 @@
-table_add MyEgress.tunnel_threshold set_threshold 12 => 0
-table_add MyEgress.tunnel_threshold set_threshold 13 => 0
+table_set_default MyIngress.tunnel_fwd NoAction
 
-table_add MyEgress.ipv4_lpm_egress set_egress 10.0.0.2/32 => 2
+table_add MyIngress.ipv4_egress set_egress 10.0.0.2/32 => 2
+
+table_add MyIngress.tunnel_threshold set_threshold 12 => 10
+table_add MyIngress.tunnel_threshold set_threshold 13 => 40
